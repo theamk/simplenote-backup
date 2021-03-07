@@ -1,0 +1,37 @@
+[MASTER]
+ignore=.git
+persistent=no
+optimize-ast=yes
+
+[MESSAGES CONTROL]
+# Do not care about CodeStyle, Readability
+disable=C,R,bare-except,locally-disabled
+
+[REPORTS]
+reports=no
+
+[MISCELLANEOUS]
+notes=FIXME,XXX,TODO
+
+[FORMAT]
+max-line-length=120
+ignore-long-lines=^\s*(# )?<?https?://\S+>?$
+
+
+[TYPECHECK]
+ignore-mixin-members=yes
+ignored-modules=
+ignored-classes=simperium.core.SPUser
+generated-members=
+
+
+[VARIABLES]
+init-import=no
+
+[BASIC]
+
+[EXCEPTIONS]
+
+# Exceptions that will emit a warning when being caught. Defaults to
+# "Exception"
+overgeneral-exceptions=Exception

@@ -1,0 +1,3 @@
+[submodule "simperium-python"]
+	path = simperium-python
+	url = https://github.com/Simperium/simperium-python
