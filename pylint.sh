@@ -1,4 +1,4 @@
 #!/bin/bash
 set -e
-PYTHONPATH=simperium-python/ pylint simplenote-backup.py 
+uv run --group dev pylint simplenote-backup.py simperium-test.py
 echo 'No errors!'

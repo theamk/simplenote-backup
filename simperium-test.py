@@ -1,21 +1,20 @@
-#!/usr/bin/python -B
+#!/usr/bin/env python3
 
-import sys
-import os
 import pprint
 import argparse
 import getpass
 import base64
 import copy
 
-sys.path.insert(1, os.path.join(os.path.dirname(os.path.realpath(__file__)), 'simperium-python'))
-
-import simperium.core
+import requests
 
 # from: https://github.com/mrtazz/simplenote.py/blob/master/simplenote/simplenote.py
 APP_ID   = 'chalk-bump-f49'
-API_KEY  = base64.b64decode('YzhjMmI4NjMzNzE1NGNkYWJjOTg5YjIzZTMwYzZiZjQ=')
+API_KEY  = base64.b64decode('YzhjMmI4NjMzNzE1NGNkYWJjOTg5YjIzZTMwYzZiZjQ=').decode('ascii')
 BUCKET   = 'note'
+AUTH_URL = 'https://auth.simperium.com/1/%s/authorize/' % APP_ID
+INDEX_URL = 'https://api.simperium.com/1/%s/%s/index' % (APP_ID, BUCKET)
+REQUEST_TIMEOUT = 60
 
 def main():
     parser = argparse.ArgumentParser()
@@ -23,35 +22,40 @@ def main():
         '-l', '--login', metavar='USER',
         help='Perform a login process, print token and exit')
     parser.add_argument(
-        '-p', '--password', 
+        '-p', '--password',
         help='Set a password for login (default ask)')
-    
+
     parser.add_argument(
         '-t', '--token', metavar='TOKEN',
         help='Use existing token')
-    
+
     args = parser.parse_args()
 
     if args.login:
         assert not args.token
-        auth = simperium.core.Auth(APP_ID, API_KEY)
         passwd = args.password
         if passwd is None:
             passwd = getpass.getpass('Password for user %r: ' % (args.login))
-        token = auth.authorize(args.login, passwd)    
-        print 'got token:', token
+        response = requests.post(AUTH_URL, data={
+            'client_id': API_KEY,
+            'username': args.login,
+            'password': passwd,
+        }, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        token = response.json()['access_token']
+        print('got token:', token)
         return
     elif args.token:
         token = args.token
     else:
         parser.error('neither login nor token given')
 
-    api = simperium.core.Api(APP_ID, token)
-    bucket = api[BUCKET]
-                
-    #print('buckets', bucket._request('%s/buckets' % APP_ID))
-
-    resp = bucket.index(data=True, limit=5)
+    response = requests.get(INDEX_URL, params={
+        'data': '1',
+        'limit': 5,
+    }, headers={'X-Simperium-Token': token}, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    resp = response.json()
     index = resp.pop('index')
     print('Result meta: %r' % (resp, ))
     for item in index:

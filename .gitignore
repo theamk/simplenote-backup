@@ -1,2 +1,4 @@
 *~
 simplenote-data-*
+.venv/
+__pycache__/

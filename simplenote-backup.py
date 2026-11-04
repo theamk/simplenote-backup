@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 """simplenote-backup --- export all simplenote contents to local directory
 
 This script uses "nvpy" setup. See documentation for this on how to add your
@@ -11,12 +11,12 @@ The program reuses config file for its own options; you may add new section:
   [simplenote-backup]
   data-dir = ~/out-dir
   token-cache-file = ~/.nv-token-cache
-  
+
 data-dir specifies where the notes should be exported. Warning: all other content in
 this directory wil be deleted.
 
-token-cache-file specifies where the token will be cached. If the token is present 
-and valid, then username/password are not required. The token will be updated 
+token-cache-file specifies where the token will be cached. If the token is present
+and valid, then username/password are not required. The token will be updated
 automatically as needed.
 
 The program can be set up to use 'git' to maintain the version history. Set it
@@ -26,7 +26,7 @@ the servers go down, it is still all in the history on your local pc!
 
 """
 
-import ConfigParser
+import configparser
 import errno
 import fcntl
 import hashlib
@@ -36,21 +36,37 @@ import os
 import re
 import subprocess
 import sys
-import socket
 import time
-import urllib2
 
 import base64
-
-sys.path.insert(1, os.path.join(os.path.dirname(os.path.realpath(__file__)), 'simperium-python'))
-
-import simperium.core
+import requests
 
 # Magic values for simperium access to live database
 # from: https://github.com/mrtazz/simplenote.py/blob/master/simplenote/simplenote.py
 APP_ID   = 'chalk-bump-f49'
-API_KEY  = base64.b64decode('YzhjMmI4NjMzNzE1NGNkYWJjOTg5YjIzZTMwYzZiZjQ=')
+API_KEY  = base64.b64decode('YzhjMmI4NjMzNzE1NGNkYWJjOTg5YjIzZTMwYzZiZjQ=').decode('ascii')
 BUCKET   = 'note'
+AUTH_URL = 'https://auth.simperium.com/1/%s/authorize/' % APP_ID
+INDEX_URL = 'https://api.simperium.com/1/%s/%s/index' % (APP_ID, BUCKET)
+REQUEST_TIMEOUT = 60
+
+
+def authorize(username, password):
+    response = requests.post(AUTH_URL, data={
+        'client_id': API_KEY,
+        'username': username,
+        'password': password,
+    }, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    return response.json()['access_token']
+
+
+def get_bucket_index(token, **params):
+    response = requests.get(INDEX_URL, params=params, headers={
+        'X-Simperium-Token': token,
+    }, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    return response.json()
 
 class OutputBusyError(Exception):
     pass
@@ -60,7 +76,7 @@ MAGIC_NAME = 'simplenote-backup'
 class SimplenoteDownloader(object):
     def __init__(self, extra_config=None, verbose=0,
                  data_dir=None):
-        self._api_bucket = None  # simperium "bucket" object
+        self._token = None
         self._lockfile = None
         self._lockfile_name = None
         self._config = None
@@ -113,10 +129,10 @@ class SimplenoteDownloader(object):
          3 - debug details
         """
         if level <= self.verbose:
-            print >>sys.stderr, '>' + '*'*level, msg
+            print('>' + '*' * level, msg, file=sys.stderr)
 
     def _read_config(self, extra_config):
-        self._config = ConfigParser.SafeConfigParser()
+        self._config = configparser.ConfigParser()
         home = os.path.abspath(os.path.expanduser('~'))
 
         # later config files overwrite earlier files
@@ -135,17 +151,17 @@ class SimplenoteDownloader(object):
 
         self.sn_username = self._config.get('nvpy', 'sn_username', raw=True)
         if not self.sn_username:
-            raise Exception('sn_username missing in config file, please set it.')
+            raise RuntimeError('sn_username missing in config file, please set it.')
 
     def _make_syncer(self):
         try:
             self._token_cache_file = os.path.expanduser(self._config.get('simplenote-backup', 'token-cache-file'))
-        except ConfigParser.Error:
+        except configparser.Error:
             self._token_cache_file = '/var/run/user/%d/simplenote-backup-token' % os.getuid()
 
         # Read token
         try:
-            with open(self._token_cache_file, 'r') as f:
+            with open(self._token_cache_file, 'r', encoding='utf-8') as f:
                 token = f.readline().strip()
             self.log(2, 'Read token (len %d) from %r' % (len(token), self._token_cache_file))
         except IOError as e:
@@ -154,33 +170,31 @@ class SimplenoteDownloader(object):
 
         # Verify token
         if token is not None:
-            self._api_bucket = simperium.core.Api(APP_ID, token)[BUCKET]
             try:
-                self._api_bucket.index(limit=1)
+                get_bucket_index(token, limit=1)
                 self.log(2, 'Using stored token')
+                self._token = token
                 return
-            except urllib2.HTTPError as err:
+            except requests.HTTPError as err:
                 self.log(0, 'Token invalid, refreshing: %s' % (err, ))
-            
-        # If we are here, we need a new token                
+
+        # If we are here, we need a new token
         sn_password = self._config.get('nvpy', 'sn_password', raw=True)
 
         if not sn_password:
-            raise Exception('Cannot sync -- no password defined, and no stored token. '
-                            'Make sure "nvpy" works')
-        
-        auth = simperium.core.Auth(APP_ID, API_KEY)
-        token = auth.authorize(self.sn_username, sn_password)
-        self.log(1, 'Authorization successful, storing token')
-        try:
-            os.makedirs(os.dirname(self._token_cache_file))
-        except:
-            pass
-        with open(self._token_cache_file, 'w') as f:
-            print >>f, token
-            print >>f, 'fetch_date=%s' % time.strftime('%FT%TZ', time.gmtime())
+            raise RuntimeError('Cannot sync -- no password defined, and no stored token. '
+                               'Make sure "nvpy" works')
 
-        self._api_bucket = simperium.core.Api(APP_ID, token)[BUCKET]
+        token = authorize(self.sn_username, sn_password)
+        self.log(1, 'Authorization successful, storing token')
+        token_dir = os.path.dirname(self._token_cache_file)
+        if token_dir:
+            os.makedirs(token_dir, exist_ok=True)
+        with open(self._token_cache_file, 'w', encoding='utf-8') as f:
+            print(token, file=f)
+            print('fetch_date=%s' % time.strftime('%FT%TZ', time.gmtime()), file=f)
+
+        self._token = token
 
     def _init_datadir(self):
         assert os.path.isdir(self.data_dir), 'Cannot find data directory %r' % (
@@ -189,15 +203,15 @@ class SimplenoteDownloader(object):
         # read magic/lockfile
         self._lockfile_name = os.path.join(self.data_dir, MAGIC_NAME)
         if not os.path.exists(self._lockfile_name):
-            raise Exception('Datadir not ready -- magic file missing. To fix:\n'
-                            "echo '%s' > '%s'\n" % (self.sn_username,
-                                                    self._lockfile_name))
+            raise RuntimeError('Datadir not ready -- magic file missing. To fix:\n'
+                               "echo '%s' > '%s'\n" % (self.sn_username,
+                                                       self._lockfile_name))
         assert self._lockfile is None
         # r+ so we can lock it
-        self._lockfile = open(self._lockfile_name, 'r+')
+        self._lockfile = open(self._lockfile_name, 'r+', encoding='utf-8')
         contents = self._lockfile.read(1024).strip()
         if contents != self.sn_username:
-            raise Exception(
+            raise RuntimeError(
                 'Datadir invalid -- magic file %r has bad contents\n'
                 'Want: %r\nHave: %r\n' % (
                     self._lockfile_name, self.sn_username, contents))
@@ -210,7 +224,7 @@ class SimplenoteDownloader(object):
                 raise
             raise OutputBusyError(
                 "Another instance is already running "
-                "-- failed to get lock")
+                "-- failed to get lock") from e
 
 
     def _read_existing_files(self):
@@ -246,7 +260,7 @@ class SimplenoteDownloader(object):
                 self.all_files.add(fullname)
 
                 if fullname.endswith('.json'):
-                    with open(abs_fn, 'r') as f:
+                    with open(abs_fn, 'r', encoding='utf-8') as f:
                         rec = json.load(f)
                     rec['filename__'] = fullname.rsplit('.', 1)[0]
                     self.entries[rec['key']] = rec
@@ -270,12 +284,12 @@ class SimplenoteDownloader(object):
                 del val['version']
 
     def sync(self):
-        # We could do a fancy sync here, passing in 'since' parameter, but it does not seem like 
+        # We could do a fancy sync here, passing in 'since' parameter, but it does not seem like
         # it is worth it, given total download only takes a few seconds.
         all_entries = []
         mark = None
         while True:
-            ret = self._api_bucket.index(data=True, mark=mark)
+            ret = get_bucket_index(self._token, data=True, mark=mark)
             mark = ret.get('mark')
             self.log(2, 'Got data, %d items, current %r, mark %r' % (len(ret['index']), ret['current'], mark))
             all_entries += ret['index']
@@ -303,7 +317,7 @@ class SimplenoteDownloader(object):
             old = self.entries.get(entry['key'], {})
             # compare with old
             same = True
-            for k in set(old.keys() + entry.keys()):
+            for k in set(old) | set(entry):
                 if k.endswith('__') or k == 'content':
                     # this is out special field
                     continue
@@ -378,7 +392,7 @@ class SimplenoteDownloader(object):
             if entry['deleted']:
                 path_tags.insert(0, 'deleted')
             # get note title from the first line of text (sanitized)
-            content_str = unicode(entry['content']).encode('utf-8')
+            content_str = str(entry['content'])
             basename = sanitize_fname(
                 content_str.strip().split('\n', 1)[0])
             path_tags.append(basename)
@@ -442,10 +456,11 @@ class SimplenoteDownloader(object):
 
 
     def _write_one_entry(self, entry, pretend):
-        content_str = unicode(entry['content']).encode('utf-8')
+        content_str = str(entry['content'])
 
-        content_len = len(content_str)
-        content_md5 = hashlib.md5(content_str).hexdigest()
+        content_bytes = content_str.encode('utf-8')
+        content_len = len(content_bytes)
+        content_md5 = hashlib.md5(content_bytes).hexdigest()
 
         if not pretend:
             fullname = os.path.join(self.data_dir,
@@ -469,8 +484,8 @@ class SimplenoteDownloader(object):
             if not pretend:
                 fullname = os.path.join(self.data_dir,
                                         entry['filename__'] + '.txt')
-                with open(fullname, 'w') as f:
-                    f.write(content_str)
+                with open(fullname, 'wb') as f:
+                    f.write(content_bytes)
 
         # create extra records for easier data viewing
         for f in ['creationDate', 'modificationDate']:
@@ -486,7 +501,7 @@ class SimplenoteDownloader(object):
         if not pretend:
             fullname = os.path.join(self.data_dir,
                                     entry['filename__'] + '.json')
-            with open(fullname, 'w') as f:
+            with open(fullname, 'w', encoding='utf-8') as f:
                 f.write(msg)    # pylint: disable=no-member
 
         self.log(1, 'Wrote entry %s to %r(%s)' % (
@@ -496,8 +511,8 @@ class SimplenoteDownloader(object):
     def verify_git(self):
         if not os.path.isdir(
             os.path.join(self.data_dir, '.git')):
-            raise Exception('Data dir has no git repo. To fix:\n'
-                            "git init '%s'" % self.data_dir)
+            raise RuntimeError('Data dir has no git repo. To fix:\n'
+                               "git init '%s'" % self.data_dir)
 
     def maybe_checkin_to_git(self, pretend=False):
         if len(self.changes) == 0:
@@ -519,7 +534,7 @@ class SimplenoteDownloader(object):
 
         self.log(1, 'commiting with message: %s' % message)
 
-        devnull = open('/dev/null', 'r+')
+        devnull = open('/dev/null', 'r+', encoding='utf-8')
         # commit
         cmd = ['git', 'add', '--all']
         if pretend: cmd.append('--dry-run')
@@ -580,11 +595,8 @@ def main():
                                   verbose=opts.verbose,
                                   data_dir=opts.output)
     except OutputBusyError as e:
-        print >>sys.stderr, 'FATAL: %s' % e
+        print('FATAL: %s' % e, file=sys.stderr)
         return 2
-
-    # Set longish timeout for all HTTP requiests
-    socket.setdefaulttimeout(60)
 
     if opts.git:
         sn.verify_git()
